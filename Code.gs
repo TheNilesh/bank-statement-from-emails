@@ -67,7 +67,7 @@ const UNSPECIFIED_SENDER_OR_SUBJECT = "no_fixed_subject_or_sender";
  * The maximum number of rows to buffer before appending to the sheet.
  * @constant {number} maxBufferSize
  */
-const maxBufferSize = 10;
+const maxBufferSize = 20;
 
 /**
  * The maximum number of email threads to query from gmail in one go.
@@ -109,8 +109,9 @@ function ProcessBankEmails() {
     Logger.log("Loading regex from sheet");
     loadRegexFromSheet(regexSheet);
 
-    // TODO: Find the last processed email date and start from there
-    let query = 'label:bank-transaction is:starred AND after:2024/2/1';
+    let afterDate = sortByDateAndGetMostRecent();
+    let query = `label:bank-transaction after:${afterDate}`;
+    // let query = 'label:bank-transaction is:starred AND after:2024/2/1';
     Logger.log(`Processing bank emails: ${query}`);
     let start = 0;
     // Buffer to store transaction sheet rows before appending them to the sheet
@@ -123,8 +124,13 @@ function ProcessBankEmails() {
             let thread = threads[i];
             for (let j = 0; j < thread.getMessageCount(); j++) {
                 let message = thread.getMessages()[j];
+                let msgId = message.getId();
+                if (isMessageProcessed(msgId)) {
+                  Logger.log(`The email is already processed: ${msgId}`)
+                  continue
+                }
                 let emailMessage = {
-                    messageId: message.getId(),
+                    messageId: msgId,
                     emailDateTime: message.getDate(),
                     mailFrom: message.getFrom(),
                     subject: message.getSubject(),
@@ -141,6 +147,8 @@ function ProcessBankEmails() {
         Logger.log(`Appending buffered ${bufferTransactionRows.length} rows to transaction sheet`);
         // appendMultipleRows(transactionSheet, bufferTransactionRows);
     }
+    let recentDate = sortByDateAndGetMostRecent();
+    Logger.log(`Email processed upto: ${recentDate}`)
 }
 
 /**
@@ -187,13 +195,16 @@ function appendRow(sheet, data, buffer) {
     let row = [];
     for (let i = 0; i < columns.length; i++) {
         // Use empty string if the field is not present in the object
+        // Adding elements in the same order as that of column names
         row.push(data[columns[i]] || '');
     }
     if (buffer) {
+        // Logger.log(`Appending row to buffer, id=${row[1]}`);
         buffer.push(row);
         if (buffer.length >= maxBufferSize) {
             appendMultipleRows(sheet, buffer);
             buffer.length = 0;
+            Logger.log(`Buffer flushed`);
         }
     } else {
         sheet.appendRow(row);
@@ -222,10 +233,9 @@ function extractTransactionInfo(emailMessage) {
                 'MessageID': emailMessage.messageId,
                 'EmailDateTime': emailMessage.emailDateTime,
                 'Bank': regexEntry.Bank,
-                'ProcessTime': new Date(),
             };
             for (let j = 0; j < matchGroups.length; j++) {
-                extractedInfo[matchGroups[j]] = match[j + 1];
+                extractedInfo[matchGroups[j]] = cleanText(match[j + 1]);
             }
             return extractedInfo;
         }
@@ -266,6 +276,7 @@ function lookupRegexPatterns(subject, sender) {
         if (regexPatterns.has(UNSPECIFIED_SENDER_OR_SUBJECT)) {
             return regexPatterns.get(UNSPECIFIED_SENDER_OR_SUBJECT);
         } else {
+            Logger.log(`regex patterns not found, for key: ${key}`);
             return [];
         }
     }
@@ -364,4 +375,69 @@ function getSheet(sheetName) {
         Logger.log(`Error getting sheet ${sheetName}: ${error}`);
         return null;
     }
+}
+
+
+/**
+ * Sorts the transactionSheet by date in descending order and returns the most recent date.
+ * TODO: Do not assume that the date is in column C.
+ * @param messageId of the email message.
+ * @returns {string} date of the most recent transaction in the transactionSheet
+ */
+function sortByDateAndGetMostRecent() {
+  const sheet = transactionSheet;
+  const lastRow = sheet.getLastRow();
+  const range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
+  
+  range.sort({column: 3, ascending: false}); // Sort by column C descending
+  
+  const mostRecent = sheet.getRange(2, 3).getValue(); // Get first value after sort (most recent)
+  
+  return Utilities.formatDate(
+    mostRecent,
+    Session.getScriptTimeZone(),
+    "yyyy/M/d"
+  );
+}
+
+/**
+ * Returns true if provided message is already processed.
+ * @param messageId of the email message.
+ * @returns {bool} true if messageId is found in the column B in the transactionSheet
+ */
+function isMessageProcessed(messageId) {
+  // Get all values from column B
+  const lastRow = transactionSheet.getLastRow();
+  
+  // If sheet is empty, return false
+  if (lastRow < 2) return false;
+  
+  const messageIds = transactionSheet.getRange("B2:B" + lastRow).getValues().flat();
+  
+  // Check if messageId exists in the array
+  return messageIds.includes(messageId);
+}
+
+
+/**
+ * Cleans text by removing newlines, multiple spaces, and other special characters
+ * @param {string} text - The text to clean
+ * @return {string} - Cleaned text
+ */
+function cleanText(text) {
+  if (!text || typeof text !== 'string') return '';
+  
+  return text
+    // Replace all types of newlines (\n, \r, \r\n)
+    .replace(/[\n\r]+/g, ' ')
+    // Replace tabs with space
+    .replace(/\t+/g, ' ')
+    // Replace multiple spaces with single space
+    .replace(/\s+/g, ' ')
+    // Remove non-printable characters
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, '')
+    // Replace Unicode spaces and zero-width spaces
+    .replace(/[\u2000-\u200F\u2028-\u202F\uFEFF]/g, ' ')
+    // Trim leading and trailing spaces
+    .trim();
 }
